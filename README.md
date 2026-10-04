@@ -1,0 +1,231 @@
+# llm-runway
+
+See how much of your AI coding plans' usage limits is left, and how long it will last: remaining quotas for status bars and scripts, plus a recorded history with burn rates, run-out projections and terminal charts.
+
+Supported providers (select with `--provider` or `LLM_RUNWAY_PROVIDER`, default `all`):
+
+- `all` — every provider on one compact line for polybar: `C <codex week> | Z <z.ai 5h>/<z.ai week> | O <go 5h>/<go week>/<go month> | CC <claude 5h>/<claude week>`.
+- `codex` — remaining Codex weekly usage limit (headless Firefox + ChatGPT login).
+- `zai` — remaining Z.ai GLM Coding Plan 5-hour and weekly quotas (API key).
+- `opencode` — remaining OpenCode Go rolling (5h), weekly, and monthly usage (headless Firefox + opencode.ai login).
+- `claude` — remaining Claude Code 5-hour and weekly limits (your Claude Code login, no browser).
+
+Pass a comma-separated list to pick which providers appear on the compact line, and in which order:
+
+```sh
+./llm-runway.js --provider claude,zai     # CC 97%/100% | Z 71%/87%
+```
+
+On the compact line, a provider that fails prints `?` (the reason goes to stderr) so the others still show.
+
+This is for people who want their remaining limits visible at a glance instead of manually refreshing analytics pages throughout the day.
+
+```
+C 97% | Z 99%/39% | O 98%/99%/98% | CC 97%/100%
+```
+
+Per-provider output:
+
+```
+week: 97%
+5h: 99% | week: 39%
+5h: 98% | week: 99% | month: 98%
+5h: 97% | week: 100%
+```
+
+## Requirements
+
+- Node.js 22.13 or newer (for the built-in `node:sqlite` used by the usage history)
+- Firefox with an active ChatGPT login (codex provider)
+- Firefox with an active opencode.ai login (opencode provider)
+- `sqlite3`, used to read Firefox's cookie database (codex, opencode providers)
+- Playwright Firefox browser binaries (codex, opencode providers)
+- A Z.ai API key (zai provider)
+- Claude Code, logged in with a Claude subscription (claude provider)
+
+Install the JavaScript dependency and browser binary:
+
+```sh
+npm install
+npx playwright install firefox
+```
+
+## Configuration
+
+Useful environment variables:
+
+```sh
+FIREFOX_PROFILE_DIR=/path/to/profile
+FIREFOX_PROFILES_INI=/path/to/profiles.ini
+FIREFOX_EXECUTABLE=/path/to/playwright/firefox
+LLM_RUNWAY_PROVIDER=zai
+ZAI_API_KEY=your-zai-api-key
+OPENCODE_ORG=org_0123456789ABCDEFGHIJKLMNPQ
+CLAUDE_CONFIG_DIR=~/.claude
+CLAUDE_CODE_OAUTH_TOKEN=your-claude-oauth-token
+LLM_RUNWAY_TIMEOUT_MS=8000 ./llm-runway.js
+```
+
+The codex provider scrapes the Codex analytics page in a headless Firefox using your ChatGPT cookies — no OAuth tokens, no direct API calls, just what your own browser session can already see.
+
+The opencode provider works the same way against your opencode.ai console session: it resolves your org via `/console/api/orgs` (no hardcoded org id in the URL you configure), then reads the Rolling/Weekly/Monthly meters off the Go page. Set `OPENCODE_ORG` to skip org discovery.
+
+Z.ai keys are read from `ZAI_API_KEY`, then `GLM_API_KEY`, then your omp/opencode sign-in (`$XDG_DATA_HOME/opencode/auth.json`, `zai-coding-plan` entry), then `~/.config/openusage/zai.json` (`{"apiKey":"…"}`), then `~/.config/zai/key.json`. Get a key from the [Z.ai console](https://z.ai/manage-apikey/apikey-list).
+
+The claude provider reads the OAuth access token Claude Code stores in `$CLAUDE_CONFIG_DIR/.credentials.json` (default `~/.claude`), or `CLAUDE_CODE_OAUTH_TOKEN` if set, and asks `https://api.anthropic.com/api/oauth/usage` for the same numbers `/usage` shows. The token lasts a few hours and Claude Code refreshes it whenever you use it; this script never refreshes it itself, because that would rotate the refresh token and log Claude Code out. If you haven't used `claude` in a while, run it once. On macOS Claude Code keeps the token in the Keychain, so set `CLAUDE_CODE_OAUTH_TOKEN` there.
+
+```sh
+./llm-runway.js --provider claude
+./llm-runway.js --provider opencode
+./llm-runway.js --provider zai
+./llm-runway.js --help
+```
+
+To inspect Firefox profiles and see which ones have ChatGPT/OpenAI cookies:
+
+```sh
+./llm-runway.js --list-profiles --provider codex
+```
+
+The profile list checks both the regular Firefox location and the Firefox Snap location when present.
+
+Use the reported profile path with `FIREFOX_PROFILE_DIR` if the automatically selected profile is not the one signed in to ChatGPT.
+
+```sh
+FIREFOX_PROFILE_DIR=/path/to/profile ./llm-runway.js --provider codex
+```
+
+## Usage
+
+```sh
+./llm-runway.js                  # all providers, one line
+./llm-runway.js --provider codex
+./llm-runway.js --provider claude,codex
+./llm-runway.js --stats          # burn rates and projections from the history
+./llm-runway.js --graph          # interactive chart of the history
+LLM_RUNWAY_PROVIDER=zai ./llm-runway.js
+```
+
+The codex and opencode providers perform a live headless Firefox refresh each invocation. Poll every 10 minutes from your status bar or scheduler to keep runtime and network usage low.
+
+If the account does not currently have a weekly usage window, its value is printed as `n/a`.
+
+## Usage History
+
+Every run appends what it fetched to a SQLite database, so a status bar polling all day builds up a record of how fast each limit is used:
+
+```
+~/.local/state/llm-runway/history.sqlite   ($XDG_STATE_HOME/llm-runway/history.sqlite)
+```
+
+Each meter becomes one row in `samples`:
+
+| column            | meaning                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| `created_at`      | unix seconds; the same for every row written by one run            |
+| `provider`        | `codex`, `zai`, `opencode` or `claude`                             |
+| `window`          | `5h`, `week`, `month`, `opus_week` or `sonnet_week`                |
+| `remaining_pct`   | remaining percentage, unrounded                                    |
+| `resets_at`       | unix seconds of the next reset, or `NULL` if the provider doesn't say |
+
+OpenCode only shows the reset as "Resets in 3d 8h", so its `resets_at` is rounded down to the smallest unit shown; the stats use the latest reset any sample of a window reported. A provider that fails writes nothing for that run. A sample is skipped when the same provider and window already has one from the last 60 seconds, so several polybar bars running the script at once don't produce duplicates.
+
+Gaps between samples (laptop asleep or off) are just missing rows. Usage from other machines still counts against the limits, so a drop across a gap is real usage whose timing is unknown.
+
+```sh
+LLM_RUNWAY_HISTORY_DB=/path/to/history.sqlite ./llm-runway.js   # use another database
+LLM_RUNWAY_HISTORY=0 ./llm-runway.js                            # don't record
+sqlite3 -header -column ~/.local/state/llm-runway/history.sqlite \
+  "SELECT datetime(created_at, 'unixepoch', 'localtime') AS at, provider, window, remaining_pct
+   FROM samples ORDER BY created_at DESC LIMIT 20"
+```
+
+Recording never changes the printed output; if it fails, the reason goes to stderr.
+
+### Stats
+
+`--stats` reads the history (it doesn't fetch anything) and prints, per meter, how fast it is being used and whether it will last until the reset:
+
+```text
+$ ./llm-runway.js --stats --provider claude
+claude 5h: 30% left, resets 21:02 (in 3h)
+  pace: 35.0%/h this window (70% used in 2h, 40% of the window), 30.0%/h last hour
+  at this window's pace: runs out 18:53, 2h 9m before reset
+  at last hour pace: runs out 19:02, 2h before reset
+
+claude week: 78% left, resets Oct 7 18:02 (in 6d)
+  pace: 22.2%/day this window (22% used in 23h 50m, 14% of the window), 2.0%/day last 24h
+  at this window's pace: runs out Mon 06:22, 2d 11h before reset
+  at last 24h pace: 66% left at reset
+  past windows used: Sep 19–Sep 26 ≥60%
+```
+
+- *this window* is the average since the window started (reset time minus the window length; monthly windows start on the same day of the previous month), so it holds across sleep gaps and needs only one sample.
+- *last hour* (5h windows) or *last 24h* (weekly and monthly) uses the recorded samples, stopping at the last reset. With less history than that, it's labelled with the span it covers (e.g. *last 20m*).
+- Providers report whole percentages, so a projection only appears once there's enough to extrapolate from: 5% of the window for *this window*, a quarter of the span for the recent pace.
+- *past windows used* lists the last four completed windows. `≥` means the last sample came well before the reset, so later usage wasn't seen.
+- If the latest sample's window has already reset (the laptop was asleep through it), the meter says so instead of showing stale numbers.
+
+Meters without a reset time (OpenCode's rolling 5h) get the recent pace but no projection: a rolling window frees old usage continuously, so a straight line through it predicts nothing.
+
+### Graph
+
+`--graph` opens an interactive terminal chart of the history (built with [Ink](https://github.com/vadimdemedes/ink)):
+
+![llm-runway --graph](doc/graph.png)
+
+Here the claude weekly meter is projected to run out before its reset — the red dashed line, labelled `empty Oct 10 10:59`, with the `!` marker in the sidebar:
+
+![llm-runway --graph, run-out forecast](doc/graph-runout.png)
+
+```sh
+./llm-runway.js --graph
+./llm-runway.js --graph --provider claude
+```
+
+- The sidebar lists every meter with a sparkline of its last 24 hours and its current level. `!` marks a meter that is used up or projected to run out before its reset; `↺` one that has reset since its last sample.
+- The chart shows the selected meter:
+  - cyan: the recorded remaining percentage. Where the laptop was asleep, a gray dotted line joins the readings on either side.
+  - yellow dashes: the current pace projected to the reset, labelled with what's left then. Red, labelled with the time, when the meter runs out first.
+  - blue dots: an even pace through the current window. Staying above it means you're within budget.
+  - magenta dots mark resets, the white line marks now. The right part of the chart is the future, widened to include the next reset when it's close.
+- The `--stats` lines for the meter are shown below the chart.
+
+Keys: `↑ ↓` / `j k` pick a meter, `← →` / `h l` switch between 6h, 24h, 7d and 30d, `r` reload, `q` quit. The history is reloaded every 30 seconds. When the output isn't a terminal, `--graph` prints one static chart per meter instead.
+
+## Polybar Example
+
+```ini
+[module/llm-runway]
+type = custom/script
+exec = /path/to/llm-runway/llm-runway.js
+interval = 600
+```
+
+Polybar resolves `node` from its own `PATH`, which usually doesn't include nvm. If the `node` it finds is older than 22.13, point `exec` at a newer one, e.g. `exec = ~/.nvm/versions/node/v24.21.0/bin/node /path/to/llm-runway/llm-runway.js`.
+
+Then add `llm-runway` to your Polybar module list. The default `all` provider prints a compact one-liner (`C` codex week, `Z` z.ai 5h/week, `O` OpenCode Go 5h/week/month, `CC` Claude Code 5h/week) that fits a single polybar module. Use `exec = /path/to/llm-runway/llm-runway.js --provider claude,codex` to show only the providers you use.
+
+## i3status Example
+
+I recommend running the query via cron and store the result in a file that i3status reads:
+
+```ini
+*/10 * * * * /bin/bash -c 'FIREFOX_PROFILE_DIR="~/.mozilla/firefox/..." path/to/llm-runway.js > ~/.llm-runway.txt'
+```
+
+```ini
+order += "read_file llm_runway"
+
+read_file llm_runway {
+  path = "~/.llm-runway.txt"
+}
+```
+
+## Security Notes
+
+The codex and opencode providers read site cookies from your Firefox profile and inject them into a fresh headless Playwright Firefox context. They do not open or lock your live Firefox profile.
+
+The `zai` provider sends your API key only to `https://api.z.ai/api/monitor/usage/quota/limit` (the same endpoint Z.ai's own usage page uses). Prefer `ZAI_API_KEY` over key files, and never commit the key.
+
+The `claude` provider sends your Claude Code OAuth access token only to `https://api.anthropic.com/api/oauth/usage`. It reads the credentials file but never writes to it.
