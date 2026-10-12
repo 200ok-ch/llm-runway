@@ -572,13 +572,13 @@ function relativeSeconds(text) {
   return total || null;
 }
 
-// The Go page has rendered both "Rolling usage 2%" (used) and
-// "Rolling usage 100% left" (remaining); honour the suffix when present.
+// The Go page has rendered "Rolling usage 2%" and "Rolling usage 2% used" (used)
+// as well as "Rolling usage 100% left" (remaining); honour the suffix when present.
 function opencodeRemaining(bodyText, label) {
-  const match = bodyText.match(new RegExp(`${label} usage (\\d+(?:\\.\\d+)?)%(\\s+(?:left|remaining))?(?:\\s+Resets in ((?:\\d+\\s*[dhms]\\s*)+))?`, 'i'));
+  const match = bodyText.match(new RegExp(`${label} usage (\\d+(?:\\.\\d+)?)%(?:\\s+(used|left|remaining))?(?:\\s+Resets in ((?:\\d+\\s*[dhms]\\s*)+))?`, 'i'));
   if (!match) return null;
   const value = Number(match[1]);
-  const remaining = match[2] ? value : 100 - value;
+  const remaining = /left|remaining/i.test(match[2] || '') ? value : 100 - value;
   const resetIn = relativeSeconds(match[3]);
   return meter(remaining, resetIn && Date.now() / 1000 + resetIn);
 }
@@ -616,13 +616,16 @@ async function fetchOpencodeBalance() {
       goPage = await context.newPage();
     }
     await goPage.goto(`${OPENCODE_CONSOLE}/${orgId}/go`, { waitUntil: 'domcontentloaded', timeout: TIMEOUT_MS });
-    await goPage.getByText('Rolling usage', { exact: false }).waitFor({ timeout: TIMEOUT_MS * 2 });
+    // The headings render before the numbers; wait for a percentage, then parse
+    // whatever is there (a timeout falls through to the error below).
+    await goPage.waitForFunction(() => /usage\s+\d/i.test(document.body.innerText), null, { timeout: TIMEOUT_MS * 2 }).catch(() => {});
     const bodyText = normalizeWhitespace(await goPage.locator('body').innerText({ timeout: TIMEOUT_MS }));
     const fiveHour = opencodeRemaining(bodyText, 'Rolling');
     const weekly = opencodeRemaining(bodyText, 'Weekly');
     const monthly = opencodeRemaining(bodyText, 'Monthly');
     if (!fiveHour && !weekly && !monthly) {
-      throw new Error('Could not parse usage meters from the opencode Go page. Check that Firefox is signed in to opencode.ai and the Go subscription is active.');
+      if (!goPage.url().includes(`/${orgId}/go`)) throw new Error(`Not signed in to opencode.ai in Firefox (redirected to ${goPage.url()}).`);
+      throw new Error(`No usage meters found on the opencode Go page: ${bodyText.slice(0, 200)}`);
     }
     return { fiveHour, weekly, monthly };
   } finally {
