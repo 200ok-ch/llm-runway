@@ -947,14 +947,15 @@ function selectedProviders() {
   return { names: [...new Set(expanded)], combined: names.length > 1 || names.includes('all') };
 }
 
-// Compact one-liner; a failing provider prints "?" (reason on stderr) instead of hiding the others.
+// Compact one-liner; a failing provider prints "n/a" instead of hiding the others. Polybar shows
+// stderr in the bar, so the reason only goes to stderr in a terminal.
 async function runCombined(names) {
   const results = await Promise.allSettled(names.map((name) => PROVIDERS[name].fetch()));
   const parts = results.map((result, index) => {
     const provider = PROVIDERS[names[index]];
     if (result.status === 'fulfilled') return `${provider.label} ${provider.compact(result.value)}`;
-    console.error(`llm-runway: ${names[index]}: ${result.reason?.message || result.reason}`);
-    return `${provider.label} ?`;
+    if (process.stderr.isTTY) console.error(`llm-runway: ${names[index]}: ${result.reason?.message || result.reason}`);
+    return `${provider.label} n/a`;
   });
   console.log(parts.join(' | '));
   recordHistory(results.flatMap((result, index) => (result.status === 'fulfilled' ? [{ name: names[index], value: result.value }] : [])));

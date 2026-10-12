@@ -16,7 +16,7 @@ Pass a comma-separated list to pick which providers appear on the compact line, 
 ./llm-runway.js --provider claude,zai     # CC 97%/100% | Z 71%/87%
 ```
 
-On the compact line, a provider that fails prints `?` (the reason goes to stderr) so the others still show.
+On the compact line, a provider that fails prints `n/a` so the others still show. Run it in a terminal to see the reason (it goes to stderr only when that is a terminal, so it stays out of polybar).
 
 This is for people who want their remaining limits visible at a glance instead of manually refreshing analytics pages throughout the day.
 
